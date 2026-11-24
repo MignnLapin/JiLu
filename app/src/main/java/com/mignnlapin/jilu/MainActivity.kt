@@ -225,6 +225,28 @@ private fun JiLuApp() {
         runUpdateCheck(auto = true)
     }
 
+    // 从「安装未知应用」设置页授权返回后，自动继续拉起系统安装器。
+    LifecycleResumeEffect(updateStatus) {
+        val waitingPermission =
+            updateStatus?.startsWith("请允许安装未知应用") == true
+        if (waitingPermission && context.packageManager.canRequestPackageInstalls()) {
+            val apk = File(context.cacheDir, "updates/update.apk")
+            if (apk.exists()) {
+                when (UpdateManager.install(context, apk)) {
+                    UpdateManager.InstallResult.OPENED ->
+                        updateStatus = "已打开系统安装器，请完成安装"
+
+                    UpdateManager.InstallResult.NEED_PERMISSION ->
+                        updateStatus = "请允许安装未知应用后再次检查更新"
+
+                    UpdateManager.InstallResult.FAILED ->
+                        updateStatus = "无法启动系统安装器"
+                }
+            }
+        }
+        onPauseOrDispose { }
+    }
+
     LaunchedEffect(Unit) {
         if (!TrackingRepository.state.value.isTracking &&
             TrackingRepository.state.value.route.isEmpty()
