@@ -22,6 +22,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -29,7 +30,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -37,7 +37,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
@@ -75,8 +74,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.LifecycleResumeEffect
@@ -147,7 +144,7 @@ private fun JiLuApp() {
     var settingsVersion by remember { mutableIntStateOf(0) }
     val amapApiKey = remember(settingsVersion) { AppSettings.getAmapApiKey(context) }
     var showKeyDialog by remember { mutableStateOf(false) }
-    var showFullMap by remember { mutableStateOf(false) }
+    var mapTouching by remember { mutableStateOf(false) }
     var checkingUpdate by remember { mutableStateOf(false) }
     var updateDownloading by remember { mutableStateOf(false) }
     var updateStatus by remember { mutableStateOf<String?>(null) }
@@ -155,7 +152,7 @@ private fun JiLuApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "1.3"
+        }.getOrNull() ?: "1.4"
     }
 
     /**
@@ -334,7 +331,7 @@ private fun JiLuApp() {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(rememberScrollState(), enabled = !mapTouching)
                 .padding(horizontal = 20.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
@@ -377,7 +374,7 @@ private fun JiLuApp() {
                 route = state.route,
                 tracking = state.isTracking,
                 onConfigureKey = { showKeyDialog = true },
-                onOpenMap = { showFullMap = true }
+                onMapTouchChanged = { mapTouching = it }
             )
 
             if (!hasLocationPermission) {
@@ -532,7 +529,10 @@ private fun JiLuApp() {
                             color = colorScheme.onSurfaceVariant
                         )
                         Spacer(Modifier.height(4.dp))
-                        TextButton(onClick = { openBatterySettings(context) }) {
+                        TextButton(
+                            onClick = { openBatterySettings(context) },
+                            contentPadding = PaddingValues(0.dp)
+                        ) {
                             Text("电池优化设置")
                         }
                     }
@@ -592,61 +592,6 @@ private fun JiLuApp() {
         )
     }
 
-    // 地图放在独立全屏对话框里，与主页面的 verticalScroll 完全隔离，手势不会再被抢走。
-    if (showFullMap && amapApiKey.isNotBlank()) {
-        Dialog(
-            onDismissRequest = { showFullMap = false },
-            properties = DialogProperties(usePlatformDefaultWidth = false)
-        ) {
-            Surface(
-                modifier = Modifier.fillMaxSize(),
-                color = colorScheme.surface
-            ) {
-                Box(Modifier.fillMaxSize()) {
-                    AmapRouteMap(
-                        apiKey = amapApiKey,
-                        route = state.route,
-                        tracking = state.isTracking,
-                        lineColor = colorScheme.primary.toArgb(),
-                        modifier = Modifier.fillMaxSize()
-                    )
-                    Surface(
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .statusBarsPadding()
-                            .padding(12.dp),
-                        shape = CircleShape,
-                        color = colorScheme.surface.copy(alpha = 0.92f),
-                        shadowElevation = 4.dp
-                    ) {
-                        IconButton(onClick = { showFullMap = false }) {
-                            Icon(
-                                imageVector = Icons.Filled.Close,
-                                contentDescription = "关闭地图"
-                            )
-                        }
-                    }
-                    Surface(
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(16.dp),
-                        shape = CircleShape,
-                        color = colorScheme.surface.copy(alpha = 0.9f)
-                    ) {
-                        Text(
-                            text = when {
-                                state.isTracking -> "实时路线 · 可缩放拖动"
-                                state.route.isEmpty() -> "暂无轨迹"
-                                else -> "历史路线 · 可缩放拖动"
-                            },
-                            style = MaterialTheme.typography.labelMedium,
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
-                        )
-                    }
-                }
-            }
-        }
-    }
 }
 
 @Composable
@@ -789,7 +734,7 @@ private fun RouteMapCard(
     route: List<TrackPoint>,
     tracking: Boolean,
     onConfigureKey: () -> Unit,
-    onOpenMap: () -> Unit
+    onMapTouchChanged: (Boolean) -> Unit
 ) {
     val colorScheme = MaterialTheme.colorScheme
     Surface(
@@ -858,39 +803,36 @@ private fun RouteMapCard(
                     }
                 }
             } else {
-                Surface(
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(12.dp)
-                        .height(150.dp)
+                        .height(240.dp)
                         .clip(RoundedCornerShape(18.dp))
-                        .clickable(onClick = onOpenMap),
-                    shape = RoundedCornerShape(18.dp),
-                    color = colorScheme.surfaceContainerHigh
                 ) {
-                    Column(
+                    AmapRouteMap(
+                        apiKey = apiKey,
+                        route = route,
+                        tracking = tracking,
+                        lineColor = colorScheme.primary.toArgb(),
+                        modifier = Modifier.fillMaxSize(),
+                        onTouchActive = onMapTouchChanged
+                    )
+                    Surface(
                         modifier = Modifier
-                            .fillMaxSize()
-                            .padding(18.dp),
-                        verticalArrangement = Arrangement.Center,
-                        horizontalAlignment = Alignment.CenterHorizontally
+                            .align(Alignment.TopStart)
+                            .padding(10.dp),
+                        shape = CircleShape,
+                        color = colorScheme.surface.copy(alpha = 0.88f)
                     ) {
-                        Icon(
-                            imageVector = Icons.Filled.Place,
-                            contentDescription = null,
-                            tint = colorScheme.primary
-                        )
-                        Spacer(Modifier.height(6.dp))
                         Text(
-                            "打开全屏地图",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = colorScheme.onSurface
-                        )
-                        Spacer(Modifier.height(2.dp))
-                        Text(
-                            "全屏中可自由缩放、拖动路线",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colorScheme.onSurfaceVariant
+                            text = when {
+                                tracking -> "实时路线"
+                                route.isEmpty() -> "暂无轨迹"
+                                else -> "历史路线"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                         )
                     }
                 }

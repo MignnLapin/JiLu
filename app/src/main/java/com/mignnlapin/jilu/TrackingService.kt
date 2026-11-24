@@ -70,6 +70,8 @@ class TrackingService : Service() {
     private var accelSmoothed = 0f
     private var accelAboveThreshold = false
     private var lastAccelStepAt = 0L
+    // 加速度计峰值先进入候选队列，连续多步且间隔合理才确认为走路，避免晃动误判
+    private val pendingAccelSteps = ArrayDeque<Long>()
 
     private val tickerHandler = Handler(Looper.getMainLooper())
     private val ticker = object : Runnable {
@@ -129,11 +131,26 @@ class TrackingService : Service() {
             accelSmoothed = 0.6f * accelSmoothed + 0.4f * magnitude
 
             if (accelSmoothed > ACCEL_STEP_THRESHOLD) {
-                if (!accelAboveThreshold && now - lastAccelStepAt >= ACCEL_STEP_MIN_INTERVAL_MS) {
-                    lastAccelStepAt = now
-                    addStep(now)
+                if (!accelAboveThreshold) {
+                    accelAboveThreshold = true
+                    val gap = now - lastAccelStepAt
+                    if (gap >= ACCEL_STEP_MIN_INTERVAL_MS) {
+                        lastAccelStepAt = now
+                        val previous = pendingAccelSteps.lastOrNull()
+                        // 与上一步间隔不合理（太快或太慢）说明是晃动，清空候选重新判断
+                        if (previous != null &&
+                            (now - previous) !in ACCEL_STEP_MIN_INTERVAL_MS..ACCEL_STEP_MAX_INTERVAL_MS
+                        ) {
+                            pendingAccelSteps.clear()
+                        }
+                        pendingAccelSteps.addLast(now)
+                        if (pendingAccelSteps.size >= ACCEL_CONFIRM_STEPS) {
+                            val confirmed = pendingAccelSteps.toList()
+                            pendingAccelSteps.clear()
+                            confirmed.forEach { addStep(it) }
+                        }
+                    }
                 }
-                accelAboveThreshold = true
             } else if (accelSmoothed < ACCEL_STEP_THRESHOLD * 0.55f) {
                 accelAboveThreshold = false
             }
@@ -211,6 +228,7 @@ class TrackingService : Service() {
         accelSmoothed = 0f
         accelAboveThreshold = false
         lastAccelStepAt = 0L
+        pendingAccelSteps.clear()
         startElapsedRealtime = SystemClock.elapsedRealtime()
         lastMovementAt = startElapsedRealtime
         lastSpeedSampleAt = startElapsedRealtime
@@ -396,7 +414,9 @@ class TrackingService : Service() {
             smoothedSpeedMps
         }
         val stepSpeed = currentStepSpeed(now)
-        return max(gpsSpeed, stepSpeed).coerceIn(0.0, 55.0)
+        val combined = max(gpsSpeed, stepSpeed)
+        // 速度死区：低于 ~1.8 km/h 的抖动（GPS 漂移、单次晃动）直接归零
+        return if (combined < MIN_VISIBLE_SPEED_MPS) 0.0 else combined.coerceIn(0.0, 55.0)
     }
 
     private fun currentStepSpeed(now: Long): Double {
@@ -439,13 +459,13 @@ class TrackingService : Service() {
         publishMetrics()
     }
 
-    private fun addStep(now: Long) {
+    private fun addStep(at: Long) {
         steps += 1
         stepDistanceMeters = steps * STEP_LENGTH_METERS
-        stepTimes.addLast(now)
+        stepTimes.addLast(at)
         while (stepTimes.size > STEP_TIMES_LIMIT) stepTimes.removeFirst()
-        lastStepAt = now
-        lastMovementAt = now
+        lastStepAt = max(lastStepAt, at)
+        lastMovementAt = SystemClock.elapsedRealtime()
         publishMetrics()
     }
 
@@ -631,8 +651,11 @@ class TrackingService : Service() {
         private const val STEP_TIMES_LIMIT = 200
         private const val STATIONARY_TIMEOUT_MS = 3000L
         private const val GRAVITY_ALPHA = 0.82f
-        private const val ACCEL_STEP_THRESHOLD = 1.1f
-        private const val ACCEL_STEP_MIN_INTERVAL_MS = 280L
+        private const val ACCEL_STEP_THRESHOLD = 1.8f
+        private const val ACCEL_STEP_MIN_INTERVAL_MS = 300L
+        private const val ACCEL_STEP_MAX_INTERVAL_MS = 1500L
+        private const val ACCEL_CONFIRM_STEPS = 4
+        private const val MIN_VISIBLE_SPEED_MPS = 0.5
 
         fun start(context: Context) {
             ContextCompat.startForegroundService(

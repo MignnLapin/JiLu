@@ -2,14 +2,18 @@ package com.mignnlapin.jilu.ui
 
 import android.os.Bundle
 import android.os.SystemClock
+import android.view.MotionEvent
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.viewinterop.AndroidView
@@ -46,10 +50,12 @@ fun AmapRouteMap(
     route: List<TrackPoint>,
     tracking: Boolean,
     lineColor: Int,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onTouchActive: (Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val currentOnTouchActive by rememberUpdatedState(onTouchActive)
 
     val mapView = remember(apiKey) {
         MapsInitializer.updatePrivacyShow(context, true, true)
@@ -57,7 +63,7 @@ fun AmapRouteMap(
         MapsInitializer.setApiKey(apiKey)
         TextureMapView(context).apply {
             onCreate(Bundle())
-            // 弹窗创建时 Activity 已处于 RESUMED，不会再次收到 ON_RESUME，这里主动恢复地图。
+            // 组件创建时 Activity 已处于 RESUMED，不会再次收到 ON_RESUME，这里主动恢复地图。
             onResume()
         }
     }
@@ -80,9 +86,40 @@ fun AmapRouteMap(
     val overlayState = remember(mapView) { MapOverlayState() }
     var lastInteractionAt by remember { mutableLongStateOf(0L) }
 
+    // 在 Initial 阶段只观察不消费：手指落在地图上时通知外层暂停页面滚动，
+    // 但事件仍完整交给地图，缩放/拖动手势不会被 Compose 吞掉。
+    val touchAwareModifier = modifier
+        .fillMaxSize()
+        .pointerInput(Unit) {
+            awaitPointerEventScope {
+                var active = false
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    val pressed = event.changes.any { it.pressed }
+                    if (pressed != active) {
+                        active = pressed
+                        currentOnTouchActive(pressed)
+                    }
+                }
+            }
+        }
+
     AndroidView(
-        factory = { mapView },
-        modifier = modifier.fillMaxSize()
+        factory = {
+            mapView.apply {
+                setOnTouchListener { view, event ->
+                    when (event.actionMasked) {
+                        MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE ->
+                            view.parent?.requestDisallowInterceptTouchEvent(true)
+
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                            view.parent?.requestDisallowInterceptTouchEvent(false)
+                    }
+                    false
+                }
+            }
+        },
+        modifier = touchAwareModifier
     ) { view ->
         val map = view.map
         if (!overlayState.configured) {
