@@ -57,6 +57,8 @@ fun AmapRouteMap(
         MapsInitializer.setApiKey(apiKey)
         TextureMapView(context).apply {
             onCreate(Bundle())
+            // 弹窗创建时 Activity 已处于 RESUMED，不会再次收到 ON_RESUME，这里主动恢复地图。
+            onResume()
         }
     }
 
