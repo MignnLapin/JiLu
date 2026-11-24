@@ -151,7 +151,7 @@ private fun JiLuApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "1.1"
+        }.getOrNull() ?: "1.2"
     }
 
     LaunchedEffect(Unit) {
@@ -383,6 +383,7 @@ private fun JiLuApp() {
                         } ?: "—"
                     )
                     DetailRow(label = "数据点", value = state.points.toString())
+                    DetailRow(label = "步数", value = state.steps.toString())
                     DetailRow(
                         label = "定位来源",
                         value = state.provider?.uppercase(Locale.US) ?: "—"
@@ -889,6 +890,9 @@ private fun requiredPermissions(): Array<String> = buildList {
     add(Manifest.permission.ACCESS_COARSE_LOCATION)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         add(Manifest.permission.POST_NOTIFICATIONS)
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        add(Manifest.permission.ACTIVITY_RECOGNITION)
     }
 }.toTypedArray()
 

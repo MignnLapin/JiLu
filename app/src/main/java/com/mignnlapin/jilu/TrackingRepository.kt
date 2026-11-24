@@ -22,6 +22,7 @@ data class TrackState(
     val averageSpeedMps: Double = 0.0,
     val distanceMeters: Double = 0.0,
     val points: Int = 0,
+    val steps: Int = 0,
     val elapsedSeconds: Double = 0.0,
     val startElapsedRealtime: Long = 0L,
     val lastFilePath: String? = null,
@@ -41,9 +42,36 @@ object TrackingRepository {
         )
     }
 
-    fun onFix(location: Location, speedMps: Double, deltaMeters: Double, elapsedSeconds: Double) {
+    /** 启动时用系统缓存位置快速给出一个初始坐标，不计入距离和轨迹点。 */
+    fun onSeed(location: Location) {
         _state.update { current ->
-            val distance = current.distanceMeters + deltaMeters
+            if (!current.isTracking) {
+                current
+            } else {
+                current.copy(
+                    hasFix = true,
+                    latitude = location.latitude,
+                    longitude = location.longitude,
+                    altitudeMeters = if (location.hasAltitude()) location.altitude else null,
+                    accuracyMeters = if (location.hasAccuracy()) location.accuracy else null,
+                    provider = location.provider,
+                    error = null
+                )
+            }
+        }
+    }
+
+    fun onFix(
+        location: Location,
+        speedMps: Double,
+        distanceMeters: Double,
+        elapsedSeconds: Double,
+        steps: Int
+    ) {
+        _state.update { current ->
+            val point = TrackPoint(location.latitude, location.longitude)
+            val lastPoint = current.route.lastOrNull()
+            val shouldAppend = lastPoint == null || distanceBetween(lastPoint, point) >= 1.0
             current.copy(
                 isTracking = true,
                 hasFix = true,
@@ -54,12 +82,32 @@ object TrackingRepository {
                 provider = location.provider,
                 speedMps = speedMps,
                 maxSpeedMps = max(current.maxSpeedMps, speedMps),
-                distanceMeters = distance,
+                distanceMeters = distanceMeters,
                 points = current.points + 1,
+                steps = steps,
                 elapsedSeconds = elapsedSeconds,
-                averageSpeedMps = if (elapsedSeconds > 0.5) distance / elapsedSeconds else 0.0,
-                route = current.route + TrackPoint(location.latitude, location.longitude),
+                averageSpeedMps = averageSpeed(distanceMeters, elapsedSeconds),
+                route = if (shouldAppend) current.route + point else current.route,
                 error = null
+            )
+        }
+    }
+
+    fun onMetrics(
+        speedMps: Double,
+        distanceMeters: Double,
+        elapsedSeconds: Double,
+        steps: Int
+    ) {
+        _state.update { current ->
+            if (!current.isTracking) return@update current
+            current.copy(
+                speedMps = speedMps,
+                maxSpeedMps = max(current.maxSpeedMps, speedMps),
+                distanceMeters = distanceMeters,
+                steps = steps,
+                elapsedSeconds = elapsedSeconds,
+                averageSpeedMps = averageSpeed(distanceMeters, elapsedSeconds)
             )
         }
     }
@@ -84,6 +132,7 @@ object TrackingRepository {
             },
             distanceMeters = track.distanceMeters,
             points = track.pointCount,
+            steps = track.steps,
             elapsedSeconds = track.elapsedSeconds,
             lastFilePath = filePath,
             route = track.points
@@ -103,5 +152,20 @@ object TrackingRepository {
 
     fun setError(message: String) {
         _state.update { it.copy(error = message) }
+    }
+
+    private fun averageSpeed(distanceMeters: Double, elapsedSeconds: Double): Double =
+        if (elapsedSeconds > 0.5) distanceMeters / elapsedSeconds else 0.0
+
+    private fun distanceBetween(a: TrackPoint, b: TrackPoint): Double {
+        val results = FloatArray(1)
+        Location.distanceBetween(
+            a.latitude,
+            a.longitude,
+            b.latitude,
+            b.longitude,
+            results
+        )
+        return results[0].toDouble()
     }
 }

@@ -10,6 +10,7 @@ data class RestoredTrack(
     val distanceMeters: Double,
     val maxSpeedMps: Double,
     val elapsedSeconds: Double,
+    val steps: Int,
     val lastAltitudeMeters: Double?,
     val lastAccuracyMeters: Float?,
     val lastProvider: String?
@@ -28,6 +29,8 @@ object TrackCsvReader {
         var elapsedSeconds = 0.0
         var previousLat: Double? = null
         var previousLon: Double? = null
+        var loggedDistance: Double? = null
+        var loggedSteps: Int? = null
         var lastAltitudeMeters: Double? = null
         var lastAccuracyMeters: Float? = null
         var lastProvider: String? = null
@@ -64,6 +67,8 @@ object TrackCsvReader {
                 lastAltitudeMeters = columns[5].toDoubleOrNull()
                 lastAccuracyMeters = columns[8].toFloatOrNull()
                 lastProvider = columns.getOrNull(10)?.takeIf { it.isNotBlank() }
+                loggedDistance = columns.getOrNull(11)?.toDoubleOrNull() ?: loggedDistance
+                loggedSteps = columns.getOrNull(12)?.toIntOrNull() ?: loggedSteps
                 rawPoints.add(TrackPoint(latitude, longitude))
             }
         } catch (_: Exception) {
@@ -84,9 +89,10 @@ object TrackCsvReader {
         return RestoredTrack(
             points = route,
             pointCount = pointCount,
-            distanceMeters = distanceMeters,
+            distanceMeters = loggedDistance ?: distanceMeters,
             maxSpeedMps = maxSpeedMps,
             elapsedSeconds = elapsedSeconds,
+            steps = loggedSteps ?: 0,
             lastAltitudeMeters = lastAltitudeMeters,
             lastAccuracyMeters = lastAccuracyMeters,
             lastProvider = lastProvider

@@ -17,12 +17,18 @@ class TrackLogger(val file: File) : Closeable {
     init {
         writer.write(
             "time_ms,time_iso,elapsed_s,latitude,longitude,altitude_m," +
-                "speed_mps,speed_kmh,accuracy_m,bearing,provider\n"
+                "speed_mps,speed_kmh,accuracy_m,bearing,provider,distance_m,steps\n"
         )
         writer.flush()
     }
 
-    fun log(location: Location, elapsedSeconds: Double, speedMps: Double) {
+    fun log(
+        location: Location,
+        elapsedSeconds: Double,
+        speedMps: Double,
+        distanceMeters: Double,
+        steps: Int
+    ) {
         val time = if (location.time > 0L) location.time else System.currentTimeMillis()
         writer.write(
             buildString {
@@ -47,6 +53,10 @@ class TrackLogger(val file: File) : Closeable {
                 append(if (location.hasBearing()) format("%.1f", location.bearing) else "")
                 append(',')
                 append(location.provider ?: "")
+                append(',')
+                append(format("%.1f", distanceMeters))
+                append(',')
+                append(steps)
                 append('\n')
             }
         )
