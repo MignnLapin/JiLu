@@ -1,6 +1,8 @@
 package com.mignnlapin.jilu
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -9,12 +11,14 @@ import android.os.Build
 import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -694,6 +698,36 @@ private fun RouteMapCard(
 }
 
 @Composable
+private fun CopyRow(label: String, value: String, monospace: Boolean = false) {
+    val context = LocalContext.current
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable {
+                val clipboard = context.getSystemService(ClipboardManager::class.java)
+                clipboard?.setPrimaryClip(ClipData.newPlainText(label, value))
+                Toast.makeText(context, "$label 已复制", Toast.LENGTH_SHORT).show()
+            },
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Text(
+                text = "$label（点击复制）",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = value,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default
+            )
+        }
+    }
+}
+
+@Composable
 private fun AmapKeyDialog(
     initialKey: String,
     onDismiss: () -> Unit,
@@ -716,15 +750,8 @@ private fun AmapKeyDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-                Text(
-                    text = "包名：${context.packageName}",
-                    style = MaterialTheme.typography.bodySmall
-                )
-                Text(
-                    text = "签名 SHA1：$sha1",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace
-                )
+                CopyRow(label = "包名", value = context.packageName)
+                CopyRow(label = "签名 SHA1", value = sha1, monospace = true)
                 Text(
                     text = "请在 open.amap.com 创建 Android 平台应用，绑定以上包名与 SHA1 后填入 Key。地图服务由高德提供。",
                     style = MaterialTheme.typography.bodySmall,
