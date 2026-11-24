@@ -27,9 +27,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -37,6 +37,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
@@ -74,6 +75,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.LifecycleResumeEffect
@@ -144,14 +147,82 @@ private fun JiLuApp() {
     var settingsVersion by remember { mutableIntStateOf(0) }
     val amapApiKey = remember(settingsVersion) { AppSettings.getAmapApiKey(context) }
     var showKeyDialog by remember { mutableStateOf(false) }
-    var mapTouching by remember { mutableStateOf(false) }
+    var showFullMap by remember { mutableStateOf(false) }
     var checkingUpdate by remember { mutableStateOf(false) }
-    var updateInfo by remember { mutableStateOf<UpdateManager.Info?>(null) }
+    var updateDownloading by remember { mutableStateOf(false) }
+    var updateStatus by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "1.2"
+        }.getOrNull() ?: "1.3"
+    }
+
+    /**
+     * 自动检查 → 自动下载 → 拉起系统安装器；没有「安装未知应用」权限时
+     * 自动跳到系统授权页。手动检查时会把结果用 Toast 提示。
+     */
+    fun runUpdateCheck(auto: Boolean) {
+        if (checkingUpdate || updateDownloading) return
+        checkingUpdate = true
+        updateStatus = null
+        scope.launch {
+            val info = UpdateManager.checkForUpdate(appVersion)
+            if (info == null) {
+                checkingUpdate = false
+                if (!auto) {
+                    val error = UpdateManager.lastError
+                    Toast.makeText(
+                        context,
+                        if (error != null) "检查更新失败：$error" else "已是最新版本",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+                return@launch
+            }
+            checkingUpdate = false
+            updateDownloading = true
+            updateStatus = "发现新版本 ${info.version}，正在下载…"
+            val apk = UpdateManager.download(context, info.url)
+            updateDownloading = false
+            if (apk == null) {
+                updateStatus = "更新下载失败"
+                Toast.makeText(
+                    context,
+                    "更新下载失败：${UpdateManager.lastError ?: "网络异常"}",
+                    Toast.LENGTH_LONG
+                ).show()
+                return@launch
+            }
+            when (UpdateManager.install(context, apk)) {
+                UpdateManager.InstallResult.OPENED -> {
+                    updateStatus = "v${info.version} 已下载，请在系统安装器中完成安装"
+                }
+
+                UpdateManager.InstallResult.NEED_PERMISSION -> {
+                    updateStatus = "请允许安装未知应用后再次检查更新"
+                    Toast.makeText(
+                        context,
+                        "已打开「安装未知应用」设置，授权后返回再次点击检查更新",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+
+                UpdateManager.InstallResult.FAILED -> {
+                    updateStatus = "无法启动系统安装器"
+                    Toast.makeText(
+                        context,
+                        "无法启动安装器：${UpdateManager.lastError ?: "未知错误"}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        delay(1500L)
+        runUpdateCheck(auto = true)
     }
 
     LaunchedEffect(Unit) {
@@ -241,7 +312,7 @@ private fun JiLuApp() {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .verticalScroll(rememberScrollState(), enabled = !mapTouching)
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
@@ -284,7 +355,7 @@ private fun JiLuApp() {
                 route = state.route,
                 tracking = state.isTracking,
                 onConfigureKey = { showKeyDialog = true },
-                onMapTouchChanged = { mapTouching = it }
+                onOpenMap = { showFullMap = true }
             )
 
             if (!hasLocationPermission) {
@@ -384,6 +455,7 @@ private fun JiLuApp() {
                     )
                     DetailRow(label = "数据点", value = state.points.toString())
                     DetailRow(label = "步数", value = state.steps.toString())
+                    DetailRow(label = "计步来源", value = state.sensorLabel)
                     DetailRow(
                         label = "定位来源",
                         value = state.provider?.uppercase(Locale.US) ?: "—"
@@ -462,32 +534,22 @@ private fun JiLuApp() {
                             color = colorScheme.onSurface
                         )
                         Text(
-                            "从 GitHub 发布页检查更新",
+                            text = updateStatus ?: "自动检查并安装 GitHub 新版本",
                             style = MaterialTheme.typography.bodySmall,
                             color = colorScheme.onSurfaceVariant
                         )
                     }
                     OutlinedButton(
-                        enabled = !checkingUpdate,
-                        onClick = {
-                            checkingUpdate = true
-                            scope.launch {
-                                val info = UpdateManager.checkForUpdate(appVersion)
-                                checkingUpdate = false
-                                if (info != null) {
-                                    updateInfo = info
-                                } else {
-                                    val error = UpdateManager.lastError
-                                    Toast.makeText(
-                                        context,
-                                        if (error != null) "检查更新失败：$error" else "已是最新版本",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
-                                }
-                            }
-                        }
+                        enabled = !checkingUpdate && !updateDownloading,
+                        onClick = { runUpdateCheck(auto = false) }
                     ) {
-                        Text(if (checkingUpdate) "检查中…" else "检查更新")
+                        Text(
+                            when {
+                                updateDownloading -> "下载中…"
+                                checkingUpdate -> "检查中…"
+                                else -> "检查更新"
+                            }
+                        )
                     }
                 }
             }
@@ -508,39 +570,60 @@ private fun JiLuApp() {
         )
     }
 
-    val pendingUpdate = updateInfo
-    if (pendingUpdate != null) {
-        AlertDialog(
-            onDismissRequest = { updateInfo = null },
-            title = { Text("发现新版本 ${pendingUpdate.version}") },
-            text = {
-                Column(
-                    Modifier
-                        .heightIn(max = 360.dp)
-                        .verticalScroll(rememberScrollState())
-                ) {
-                    Text(
-                        text = pendingUpdate.notes.ifBlank { "有新的版本可用，建议下载更新。" },
-                        style = MaterialTheme.typography.bodySmall
+    // 地图放在独立全屏对话框里，与主页面的 verticalScroll 完全隔离，手势不会再被抢走。
+    if (showFullMap && amapApiKey.isNotBlank()) {
+        Dialog(
+            onDismissRequest = { showFullMap = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = colorScheme.surface
+            ) {
+                Box(Modifier.fillMaxSize()) {
+                    AmapRouteMap(
+                        apiKey = amapApiKey,
+                        route = state.route,
+                        tracking = state.isTracking,
+                        lineColor = colorScheme.primary.toArgb(),
+                        modifier = Modifier.fillMaxSize()
                     )
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        updateInfo = null
-                        runCatching {
-                            context.startActivity(
-                                Intent(Intent.ACTION_VIEW, Uri.parse(pendingUpdate.url))
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .statusBarsPadding()
+                            .padding(12.dp),
+                        shape = CircleShape,
+                        color = colorScheme.surface.copy(alpha = 0.92f),
+                        shadowElevation = 4.dp
+                    ) {
+                        IconButton(onClick = { showFullMap = false }) {
+                            Icon(
+                                imageVector = Icons.Filled.Close,
+                                contentDescription = "关闭地图"
                             )
                         }
                     }
-                ) { Text("前往下载") }
-            },
-            dismissButton = {
-                TextButton(onClick = { updateInfo = null }) { Text("稍后") }
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(16.dp),
+                        shape = CircleShape,
+                        color = colorScheme.surface.copy(alpha = 0.9f)
+                    ) {
+                        Text(
+                            text = when {
+                                state.isTracking -> "实时路线 · 可缩放拖动"
+                                state.route.isEmpty() -> "暂无轨迹"
+                                else -> "历史路线 · 可缩放拖动"
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                        )
+                    }
+                }
             }
-        )
+        }
     }
 }
 
@@ -684,7 +767,7 @@ private fun RouteMapCard(
     route: List<TrackPoint>,
     tracking: Boolean,
     onConfigureKey: () -> Unit,
-    onMapTouchChanged: (Boolean) -> Unit
+    onOpenMap: () -> Unit
 ) {
     val colorScheme = MaterialTheme.colorScheme
     Surface(
@@ -753,36 +836,39 @@ private fun RouteMapCard(
                     }
                 }
             } else {
-                Box(
+                Surface(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(12.dp)
-                        .height(260.dp)
+                        .height(150.dp)
                         .clip(RoundedCornerShape(18.dp))
+                        .clickable(onClick = onOpenMap),
+                    shape = RoundedCornerShape(18.dp),
+                    color = colorScheme.surfaceContainerHigh
                 ) {
-                    AmapRouteMap(
-                        apiKey = apiKey,
-                        route = route,
-                        tracking = tracking,
-                        lineColor = colorScheme.primary.toArgb(),
-                        modifier = Modifier.fillMaxSize(),
-                        onTouchActive = onMapTouchChanged
-                    )
-                    Surface(
+                    Column(
                         modifier = Modifier
-                            .align(Alignment.TopStart)
-                            .padding(10.dp),
-                        shape = CircleShape,
-                        color = colorScheme.surface.copy(alpha = 0.88f)
+                            .fillMaxSize()
+                            .padding(18.dp),
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
+                        Icon(
+                            imageVector = Icons.Filled.Place,
+                            contentDescription = null,
+                            tint = colorScheme.primary
+                        )
+                        Spacer(Modifier.height(6.dp))
                         Text(
-                            text = when {
-                                tracking -> "实时路线"
-                                route.isEmpty() -> "暂无轨迹"
-                                else -> "历史路线"
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            "打开全屏地图",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = colorScheme.onSurface
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            "全屏中可自由缩放、拖动路线",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colorScheme.onSurfaceVariant
                         )
                     }
                 }

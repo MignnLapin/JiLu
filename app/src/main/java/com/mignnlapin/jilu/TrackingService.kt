@@ -35,6 +35,7 @@ import java.util.Locale
 import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 
 class TrackingService : Service() {
 
@@ -64,6 +65,12 @@ class TrackingService : Service() {
     private var lastStepAt = 0L
     private val stepTimes = ArrayDeque<Long>()
 
+    // 加速度计兜底计步：部分机型没有计步传感器，或未授予运动识别权限
+    private val gravityValues = FloatArray(3)
+    private var accelSmoothed = 0f
+    private var accelAboveThreshold = false
+    private var lastAccelStepAt = 0L
+
     private val tickerHandler = Handler(Looper.getMainLooper())
     private val ticker = object : Runnable {
         override fun run() {
@@ -88,28 +95,48 @@ class TrackingService : Service() {
 
     private val stepListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
-            if (!tracking || event.sensor.type != Sensor.TYPE_STEP_COUNTER) return
-            val total = event.values[0]
-            val baseline = stepBaseline
-            if (baseline == null) {
-                stepBaseline = total
-                return
+            if (!tracking) return
+            when (event.sensor.type) {
+                // 硬件计步器：开机以来的累计步数，需要基准值
+                Sensor.TYPE_STEP_COUNTER -> handleStepCounter(event.values[0])
+                // 步伐检测：每发生一步上报一次
+                Sensor.TYPE_STEP_DETECTOR -> addStep(SystemClock.elapsedRealtime())
+                else -> Unit
             }
-            if (total < baseline) {
-                stepBaseline = total
-                return
-            }
-            val newSteps = (total - baseline).toInt()
-            if (newSteps <= steps) return
+        }
 
-            val added = newSteps - steps
-            steps = newSteps
-            stepDistanceMeters = steps * STEP_LENGTH_METERS
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+    }
+
+    /**
+     * 加速度计兜底计步：去掉重力分量后做峰值检测。
+     * 不需要 ACTIVITY_RECOGNITION 权限，几乎全部机型都可用。
+     */
+    private val accelerometerListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            if (!tracking || event.sensor.type != Sensor.TYPE_ACCELEROMETER) return
             val now = SystemClock.elapsedRealtime()
-            repeat(added.coerceAtMost(100)) { stepTimes.addLast(now) }
-            lastStepAt = now
-            lastMovementAt = now
-            publishMetrics()
+            val values = event.values
+            // 低通滤波估计重力方向
+            for (i in 0..2) {
+                gravityValues[i] = GRAVITY_ALPHA * gravityValues[i] +
+                    (1f - GRAVITY_ALPHA) * values[i]
+            }
+            val lx = values[0] - gravityValues[0]
+            val ly = values[1] - gravityValues[1]
+            val lz = values[2] - gravityValues[2]
+            val magnitude = sqrt(lx * lx + ly * ly + lz * lz)
+            accelSmoothed = 0.6f * accelSmoothed + 0.4f * magnitude
+
+            if (accelSmoothed > ACCEL_STEP_THRESHOLD) {
+                if (!accelAboveThreshold && now - lastAccelStepAt >= ACCEL_STEP_MIN_INTERVAL_MS) {
+                    lastAccelStepAt = now
+                    addStep(now)
+                }
+                accelAboveThreshold = true
+            } else if (accelSmoothed < ACCEL_STEP_THRESHOLD * 0.55f) {
+                accelAboveThreshold = false
+            }
         }
 
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
@@ -180,6 +207,10 @@ class TrackingService : Service() {
         stepDistanceMeters = 0.0
         lastStepAt = 0L
         stepTimes.clear()
+        gravityValues.fill(0f)
+        accelSmoothed = 0f
+        accelAboveThreshold = false
+        lastAccelStepAt = 0L
         startElapsedRealtime = SystemClock.elapsedRealtime()
         lastMovementAt = startElapsedRealtime
         lastSpeedSampleAt = startElapsedRealtime
@@ -194,7 +225,7 @@ class TrackingService : Service() {
         )
         acquireWakeLock()
         registerLocationUpdates()
-        registerStepCounter()
+        registerStepSensors()
         tickerHandler.removeCallbacks(ticker)
         tickerHandler.postDelayed(ticker, 1000L)
     }
@@ -387,24 +418,96 @@ class TrackingService : Service() {
     private fun elapsedSeconds(now: Long): Double =
         (now - startElapsedRealtime) / 1000.0
 
-    private fun registerStepCounter() {
-        val manager = sensorManager ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACTIVITY_RECOGNITION
-            ) != PackageManager.PERMISSION_GRANTED
+    private fun handleStepCounter(total: Float) {
+        val baseline = stepBaseline
+        if (baseline == null || total < baseline) {
+            stepBaseline = total
+            return
+        }
+        val newSteps = (total - baseline).toInt()
+        if (newSteps <= steps) return
+        val added = newSteps - steps
+        steps = newSteps
+        stepDistanceMeters = steps * STEP_LENGTH_METERS
+        val now = SystemClock.elapsedRealtime()
+        repeat(added.coerceAtMost(100)) {
+            stepTimes.addLast(now)
+            while (stepTimes.size > STEP_TIMES_LIMIT) stepTimes.removeFirst()
+        }
+        lastStepAt = now
+        lastMovementAt = now
+        publishMetrics()
+    }
+
+    private fun addStep(now: Long) {
+        steps += 1
+        stepDistanceMeters = steps * STEP_LENGTH_METERS
+        stepTimes.addLast(now)
+        while (stepTimes.size > STEP_TIMES_LIMIT) stepTimes.removeFirst()
+        lastStepAt = now
+        lastMovementAt = now
+        publishMetrics()
+    }
+
+    /**
+     * 依次尝试：硬件计步器 → 步伐检测 → 加速度计。
+     * 运动识别权限被拒绝或机型缺少计步传感器时，加速度计仍可估算步数。
+     */
+    private fun registerStepSensors() {
+        val manager = sensorManager ?: run {
+            stepSensorAvailable = false
+            TrackingRepository.setSensorLabel("不可用")
+            return
+        }
+        val canUseActivitySensors =
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+                ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.ACTIVITY_RECOGNITION
+                ) == PackageManager.PERMISSION_GRANTED
+        if (canUseActivitySensors) {
+            val counter = manager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
+            if (counter != null && runCatching {
+                    manager.registerListener(
+                        stepListener,
+                        counter,
+                        SensorManager.SENSOR_DELAY_NORMAL
+                    )
+                }.getOrDefault(false)
+            ) {
+                stepSensorAvailable = true
+                TrackingRepository.setSensorLabel("计步传感器")
+                return
+            }
+            val detector = manager.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
+            if (detector != null && runCatching {
+                    manager.registerListener(
+                        stepListener,
+                        detector,
+                        SensorManager.SENSOR_DELAY_NORMAL
+                    )
+                }.getOrDefault(false)
+            ) {
+                stepSensorAvailable = true
+                TrackingRepository.setSensorLabel("步伐检测")
+                return
+            }
+        }
+        val accelerometer = manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        if (accelerometer != null && runCatching {
+                manager.registerListener(
+                    accelerometerListener,
+                    accelerometer,
+                    SensorManager.SENSOR_DELAY_UI
+                )
+            }.getOrDefault(false)
         ) {
+            stepSensorAvailable = true
+            TrackingRepository.setSensorLabel("加速度计")
+        } else {
             stepSensorAvailable = false
-            return
+            TrackingRepository.setSensorLabel("不可用")
         }
-        val sensor = manager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER) ?: run {
-            stepSensorAvailable = false
-            return
-        }
-        stepSensorAvailable = runCatching {
-            manager.registerListener(stepListener, sensor, SensorManager.SENSOR_DELAY_NORMAL)
-        }.getOrDefault(false)
     }
 
     private fun updateNotification(force: Boolean = false) {
@@ -464,6 +567,7 @@ class TrackingService : Service() {
         tracking = false
         runCatching { locationManager.removeUpdates(locationListener) }
         runCatching { sensorManager?.unregisterListener(stepListener) }
+        runCatching { sensorManager?.unregisterListener(accelerometerListener) }
         tickerHandler.removeCallbacks(ticker)
         releaseWakeLock()
 
@@ -524,7 +628,11 @@ class TrackingService : Service() {
         private const val ACTION_STOP = "com.mignnlapin.jilu.action.STOP"
         private const val STEP_LENGTH_METERS = 0.7
         private const val STEP_WINDOW_MS = 4000L
+        private const val STEP_TIMES_LIMIT = 200
         private const val STATIONARY_TIMEOUT_MS = 3000L
+        private const val GRAVITY_ALPHA = 0.82f
+        private const val ACCEL_STEP_THRESHOLD = 1.1f
+        private const val ACCEL_STEP_MIN_INTERVAL_MS = 280L
 
         fun start(context: Context) {
             ContextCompat.startForegroundService(

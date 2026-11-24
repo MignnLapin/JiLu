@@ -23,6 +23,7 @@ data class TrackState(
     val distanceMeters: Double = 0.0,
     val points: Int = 0,
     val steps: Int = 0,
+    val sensorLabel: String = "—",
     val elapsedSeconds: Double = 0.0,
     val startElapsedRealtime: Long = 0L,
     val lastFilePath: String? = null,
@@ -152,6 +153,11 @@ object TrackingRepository {
 
     fun setError(message: String) {
         _state.update { it.copy(error = message) }
+    }
+
+    /** 显示当前使用的计步来源，便于排查室内无距离的问题。 */
+    fun setSensorLabel(label: String) {
+        _state.update { it.copy(sensorLabel = label) }
     }
 
     private fun averageSpeed(distanceMeters: Double, elapsedSeconds: Double): Double =

@@ -1,13 +1,22 @@
 package com.mignnlapin.jilu
 
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 
 /**
  * 检查 GitHub Release 更新。优先使用官方 API，被限流时改用发布页 / Atom。
+ * 发现新版本后可直接下载安装包并拉起系统安装器。
  */
 object UpdateManager {
     private const val REPO = "MignnLapin/JiLu"
@@ -16,12 +25,19 @@ object UpdateManager {
     private const val WEB_RELEASES = "https://github.com/$REPO/releases"
     private const val ATOM = "https://github.com/$REPO/releases.atom"
     private const val USER_AGENT = "JiLu"
+    private val MIRRORS = listOf(
+        "https://ghfast.top/",
+        "https://gh-proxy.com/",
+        "https://mirror.ghproxy.com/"
+    )
 
     @Volatile
     var lastError: String? = null
         private set
 
     data class Info(val version: String, val url: String, val notes: String)
+
+    enum class InstallResult { OPENED, NEED_PERMISSION, FAILED }
 
     suspend fun checkForUpdate(current: String): Info? = withContext(Dispatchers.IO) {
         lastError = null
@@ -184,6 +200,171 @@ object UpdateManager {
         body
     } catch (t: Throwable) {
         null
+    }
+
+    /** 下载 APK 到应用缓存目录；GitHub 直连失败时依次尝试公共加速镜像。 */
+    suspend fun download(context: Context, url: String): File? = withContext(Dispatchers.IO) {
+        lastError = null
+        val dir = File(context.cacheDir, "updates").apply {
+            if (!exists()) mkdirs()
+        }
+        val candidates = buildList {
+            add(url)
+            if (url.startsWith("https://github.com/")) {
+                MIRRORS.forEach { add(it + url) }
+            }
+        }
+        var message: String? = null
+        for (candidate in candidates) {
+            val file = try {
+                downloadOnce(candidate, dir)
+            } catch (t: Throwable) {
+                message = t.message ?: t.javaClass.simpleName
+                null
+            }
+            if (file != null && verifyApk(context, file)) {
+                return@withContext file
+            }
+            if (file != null) {
+                message = "下载的安装包校验失败"
+                file.delete()
+            }
+        }
+        lastError = message ?: lastError ?: "网络异常"
+        null
+    }
+
+    private fun downloadOnce(url: String, dir: File): File? {
+        val target = File(dir, "update.apk")
+        if (target.exists()) target.delete()
+        var current = URL(url)
+        var redirects = 0
+        while (true) {
+            val connection = current.openConnection() as HttpURLConnection
+            connection.instanceFollowRedirects = false
+            connection.connectTimeout = 20000
+            connection.readTimeout = 30000
+            connection.setRequestProperty("User-Agent", USER_AGENT)
+            val code = connection.responseCode
+            if (code in 300..399) {
+                val location = connection.getHeaderField("Location")
+                connection.disconnect()
+                if (location == null || ++redirects > 5) {
+                    lastError = "下载重定向失败"
+                    return null
+                }
+                current = URL(location)
+                continue
+            }
+            if (code != 200) {
+                connection.disconnect()
+                lastError = "下载失败（HTTP $code）"
+                return null
+            }
+            connection.inputStream.use { input ->
+                target.outputStream().use { output -> input.copyTo(output) }
+            }
+            connection.disconnect()
+            break
+        }
+        if (target.length() <= 0L) {
+            lastError = "下载内容为空"
+            return null
+        }
+        return target
+    }
+
+    /** 校验下载到的 APK 确实属于本应用且版本号更高，避免镜像返回错误页面。 */
+    private fun verifyApk(context: Context, file: File): Boolean = try {
+        if (file.length() <= 0L) {
+            false
+        } else {
+            val magic = ByteArray(2)
+            val isZip = file.inputStream().use { input ->
+                input.read(magic) == 2 &&
+                    magic[0] == 'P'.code.toByte() &&
+                    magic[1] == 'K'.code.toByte()
+            }
+            if (!isZip) {
+                false
+            } else {
+                val archive = context.packageManager.getPackageArchiveInfo(
+                    file.absolutePath,
+                    PackageManager.GET_SIGNING_CERTIFICATES
+                )
+                if (archive == null || archive.packageName != context.packageName) {
+                    false
+                } else {
+                    val newCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        archive.longVersionCode
+                    } else {
+                        @Suppress("DEPRECATION")
+                        archive.versionCode.toLong()
+                    }
+                    val installed = context.packageManager.getPackageInfo(
+                        context.packageName,
+                        0
+                    )
+                    val installedCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        installed.longVersionCode
+                    } else {
+                        @Suppress("DEPRECATION")
+                        installed.versionCode.toLong()
+                    }
+                    newCode > installedCode
+                }
+            }
+        }
+    } catch (t: Throwable) {
+        false
+    }
+
+    /**
+     * 安装已下载的 APK。没有「安装未知应用」权限时先打开系统授权页，
+     * 授权后再次调用即可拉起系统安装器。
+     */
+    fun install(context: Context, apk: File): InstallResult {
+        lastError = null
+        if (!context.packageManager.canRequestPackageInstalls()) {
+            if (!openUnknownSourcesSettings(context)) return InstallResult.FAILED
+            return InstallResult.NEED_PERMISSION
+        }
+        return if (launchInstaller(context, apk)) {
+            InstallResult.OPENED
+        } else {
+            InstallResult.FAILED
+        }
+    }
+
+    private fun openUnknownSourcesSettings(context: Context): Boolean = try {
+        context.startActivity(
+            Intent(
+                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                Uri.parse("package:${context.packageName}")
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+        true
+    } catch (t: Throwable) {
+        lastError = "无法打开「安装未知应用」设置"
+        false
+    }
+
+    private fun launchInstaller(context: Context, apk: File): Boolean = try {
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            apk
+        )
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, "application/vnd.android.package-archive")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+        true
+    } catch (t: Throwable) {
+        lastError = t.message ?: "无法启动系统安装器"
+        false
     }
 
     private fun compareVersion(a: String, b: String): Int {
