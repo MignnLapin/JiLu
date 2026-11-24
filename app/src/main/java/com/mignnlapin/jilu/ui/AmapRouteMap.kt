@@ -1,13 +1,21 @@
 package com.mignnlapin.jilu.ui
 
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.MotionEvent
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.viewinterop.AndroidView
@@ -76,81 +84,101 @@ fun AmapRouteMap(
     }
 
     val overlayState = remember(mapView) { MapOverlayState() }
+    var interacting by remember { mutableStateOf(false) }
+    var lastInteractionAt by remember { mutableLongStateOf(0L) }
 
-    AndroidView(
-        factory = {
-            mapView.apply {
-                setOnTouchListener { view, event ->
-                    when (event.actionMasked) {
-                        MotionEvent.ACTION_DOWN -> {
-                            currentOnTouchActive(true)
-                            view.parent?.requestDisallowInterceptTouchEvent(true)
-                        }
-
-                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                            currentOnTouchActive(false)
-                            view.parent?.requestDisallowInterceptTouchEvent(false)
+    Box(
+        modifier = modifier.pointerInput(Unit) {
+            awaitPointerEventScope {
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Main)
+                    val pressed = event.changes.any { it.pressed }
+                    // 地图内部先处理手势，这里再把事件标记为已消费，阻止外层页面滚动。
+                    event.changes.forEach { it.consume() }
+                    if (pressed != interacting) {
+                        interacting = pressed
+                        currentOnTouchActive(pressed)
+                        if (!pressed) {
+                            lastInteractionAt = SystemClock.elapsedRealtime()
                         }
                     }
-                    false
                 }
             }
-        },
-        modifier = modifier
-    ) { view ->
-        val map = view.map
-        if (!overlayState.configured) {
-            map.uiSettings.isZoomControlsEnabled = false
-            map.uiSettings.isCompassEnabled = false
-            map.uiSettings.isScaleControlsEnabled = false
-            overlayState.configured = true
         }
+    ) {
+        AndroidView(
+            factory = {
+                mapView.apply {
+                    setOnTouchListener { view, event ->
+                        when (event.actionMasked) {
+                            MotionEvent.ACTION_DOWN ->
+                                view.parent?.requestDisallowInterceptTouchEvent(true)
 
-        if (route.isEmpty()) {
-            overlayState.polyline?.remove()
-            overlayState.polyline = null
-            overlayState.startMarker?.remove()
-            overlayState.startMarker = null
-            overlayState.endMarker?.remove()
-            overlayState.endMarker = null
-            overlayState.lastRouteSize = 0
-            return@AndroidView
-        }
+                            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                                view.parent?.requestDisallowInterceptTouchEvent(false)
+                        }
+                        false
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxSize()
+        ) { view ->
+            val map = view.map
+            if (!overlayState.configured) {
+                map.uiSettings.isZoomControlsEnabled = false
+                map.uiSettings.isCompassEnabled = false
+                map.uiSettings.isScaleControlsEnabled = false
+                overlayState.configured = true
+            }
 
-        val latLngs = route.map { it.toAmapLatLng() }
-        val first = latLngs.first()
-        val last = latLngs.last()
+            if (route.isEmpty()) {
+                overlayState.polyline?.remove()
+                overlayState.polyline = null
+                overlayState.startMarker?.remove()
+                overlayState.startMarker = null
+                overlayState.endMarker?.remove()
+                overlayState.endMarker = null
+                overlayState.lastRouteSize = 0
+                return@AndroidView
+            }
 
-        if (overlayState.startMarker == null) {
-            overlayState.startMarker = map.addMarker(
-                MarkerOptions().position(first).title("起点")
-            )
-        }
-        if (overlayState.endMarker == null) {
-            overlayState.endMarker = map.addMarker(
-                MarkerOptions().position(last).title(if (tracking) "当前位置" else "终点")
-            )
-        }
-        overlayState.endMarker?.position = last
+            val latLngs = route.map { it.toAmapLatLng() }
+            val first = latLngs.first()
+            val last = latLngs.last()
 
-        if (overlayState.polyline == null) {
-            overlayState.polyline = map.addPolyline(
-                PolylineOptions()
-                    .width(12f)
-                    .color(lineColor)
-                    .addAll(latLngs)
-            )
-        } else {
-            overlayState.polyline?.setPoints(latLngs)
-        }
+            if (overlayState.startMarker == null) {
+                overlayState.startMarker = map.addMarker(
+                    MarkerOptions().position(first).title("起点")
+                )
+            }
+            if (overlayState.endMarker == null) {
+                overlayState.endMarker = map.addMarker(
+                    MarkerOptions().position(last).title(if (tracking) "当前位置" else "终点")
+                )
+            }
+            overlayState.endMarker?.position = last
 
-        if (overlayState.lastRouteSize == 0) {
-            fitRoute(map, latLngs)
-        } else if (tracking && route.size > overlayState.lastRouteSize) {
-            val zoom = max(map.cameraPosition?.zoom ?: 15f, 15f)
-            map.moveCamera(CameraUpdateFactory.newLatLngZoom(last, zoom))
+            if (overlayState.polyline == null) {
+                overlayState.polyline = map.addPolyline(
+                    PolylineOptions()
+                        .width(12f)
+                        .color(lineColor)
+                        .addAll(latLngs)
+                )
+            } else {
+                overlayState.polyline?.setPoints(latLngs)
+            }
+
+            val now = SystemClock.elapsedRealtime()
+            val userBusy = interacting || now - lastInteractionAt < 5000L
+            if (overlayState.lastRouteSize == 0) {
+                fitRoute(map, latLngs)
+            } else if (tracking && route.size > overlayState.lastRouteSize && !userBusy) {
+                val zoom = max(map.cameraPosition?.zoom ?: 15f, 15f)
+                map.moveCamera(CameraUpdateFactory.newLatLngZoom(last, zoom))
+            }
+            overlayState.lastRouteSize = route.size
         }
-        overlayState.lastRouteSize = route.size
     }
 }
 

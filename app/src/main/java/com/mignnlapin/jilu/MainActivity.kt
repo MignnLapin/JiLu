@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -60,6 +61,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -80,6 +82,7 @@ import com.mignnlapin.jilu.ui.AmapRouteMap
 import com.mignnlapin.jilu.ui.theme.JiLuTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.security.MessageDigest
@@ -142,6 +145,14 @@ private fun JiLuApp() {
     val amapApiKey = remember(settingsVersion) { AppSettings.getAmapApiKey(context) }
     var showKeyDialog by remember { mutableStateOf(false) }
     var mapTouching by remember { mutableStateOf(false) }
+    var checkingUpdate by remember { mutableStateOf(false) }
+    var updateInfo by remember { mutableStateOf<UpdateManager.Info?>(null) }
+    val scope = rememberCoroutineScope()
+    val appVersion = remember {
+        runCatching {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName
+        }.getOrNull() ?: "1.1"
+    }
 
     LaunchedEffect(Unit) {
         if (!TrackingRepository.state.value.isTracking &&
@@ -433,6 +444,53 @@ private fun JiLuApp() {
                 }
             }
 
+            Surface(
+                shape = RoundedCornerShape(24.dp),
+                color = colorScheme.surfaceContainerLow
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "版本 $appVersion",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = colorScheme.onSurface
+                        )
+                        Text(
+                            "从 GitHub 发布页检查更新",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colorScheme.onSurfaceVariant
+                        )
+                    }
+                    OutlinedButton(
+                        enabled = !checkingUpdate,
+                        onClick = {
+                            checkingUpdate = true
+                            scope.launch {
+                                val info = UpdateManager.checkForUpdate(appVersion)
+                                checkingUpdate = false
+                                if (info != null) {
+                                    updateInfo = info
+                                } else {
+                                    val error = UpdateManager.lastError
+                                    Toast.makeText(
+                                        context,
+                                        if (error != null) "检查更新失败：$error" else "已是最新版本",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            }
+                        }
+                    ) {
+                        Text(if (checkingUpdate) "检查中…" else "检查更新")
+                    }
+                }
+            }
+
             Spacer(Modifier.height(16.dp))
         }
     }
@@ -445,6 +503,41 @@ private fun JiLuApp() {
                 AppSettings.setAmapApiKey(context, key)
                 settingsVersion++
                 showKeyDialog = false
+            }
+        )
+    }
+
+    val pendingUpdate = updateInfo
+    if (pendingUpdate != null) {
+        AlertDialog(
+            onDismissRequest = { updateInfo = null },
+            title = { Text("发现新版本 ${pendingUpdate.version}") },
+            text = {
+                Column(
+                    Modifier
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(
+                        text = pendingUpdate.notes.ifBlank { "有新的版本可用，建议下载更新。" },
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        updateInfo = null
+                        runCatching {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse(pendingUpdate.url))
+                            )
+                        }
+                    }
+                ) { Text("前往下载") }
+            },
+            dismissButton = {
+                TextButton(onClick = { updateInfo = null }) { Text("稍后") }
             }
         )
     }
