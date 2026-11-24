@@ -137,6 +137,7 @@ private fun JiLuApp() {
     var settingsVersion by remember { mutableIntStateOf(0) }
     val amapApiKey = remember(settingsVersion) { AppSettings.getAmapApiKey(context) }
     var showKeyDialog by remember { mutableStateOf(false) }
+    var mapTouching by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         if (!TrackingRepository.state.value.isTracking &&
@@ -225,7 +226,7 @@ private fun JiLuApp() {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(rememberScrollState(), enabled = !mapTouching)
                 .padding(horizontal = 20.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
@@ -267,7 +268,8 @@ private fun JiLuApp() {
                 apiKey = amapApiKey,
                 route = state.route,
                 tracking = state.isTracking,
-                onConfigureKey = { showKeyDialog = true }
+                onConfigureKey = { showKeyDialog = true },
+                onMapTouchChanged = { mapTouching = it }
             )
 
             if (!hasLocationPermission) {
@@ -583,7 +585,8 @@ private fun RouteMapCard(
     apiKey: String,
     route: List<TrackPoint>,
     tracking: Boolean,
-    onConfigureKey: () -> Unit
+    onConfigureKey: () -> Unit,
+    onMapTouchChanged: (Boolean) -> Unit
 ) {
     val colorScheme = MaterialTheme.colorScheme
     Surface(
@@ -664,7 +667,8 @@ private fun RouteMapCard(
                         route = route,
                         tracking = tracking,
                         lineColor = colorScheme.primary.toArgb(),
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize(),
+                        onTouchActive = onMapTouchChanged
                     )
                     Surface(
                         modifier = Modifier
